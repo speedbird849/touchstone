@@ -28,7 +28,7 @@ def split_sentences(text, max_sentences=8):
 
 class GuardrailEngine:
     def __init__(self, model_name="MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli",
-                 nli_threshold=0.65, entail_floor=0.30, contra_cap=0.40,
+                 nli_threshold=0.65, entail_floor=0.55, contra_cap=0.40,
                  use_sentence_window=True):
         self.device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -252,14 +252,19 @@ class GuardrailEngine:
             final_verdict = llm_verdict
             status = "AGREEMENT"
         elif llm_verdict == "REFUTED" and nli_verdict == "NOT_ENOUGH_INFO":
-            # Guardrail intercepts overreaching refutation (e.g. unmentioned attribute)
-            final_verdict = "NOT_ENOUGH_INFO"
-            status = "OVERREACH_DOWNGRADED"
+            # Only downgrade if there is genuinely no contradiction signal in the text.
+            # If paragraph or sentence contradiction is present (>= 0.25), trust the LLM's categorical/slot refutation.
+            c_score = max(nli_check["best_contradiction"]["score"],
+                          nli_check.get("sentence_contra_max", {}).get("score", 0.0))
+            if c_score < 0.25:
+                final_verdict = "NOT_ENOUGH_INFO"
+                status = "OVERREACH_DOWNGRADED"
+            else:
+                final_verdict = "REFUTED"
+                status = "AGREEMENT"
         elif llm_verdict == "SUPPORTED" and nli_verdict == "NOT_ENOUGH_INFO":
-            # Soft gate: paragraph-level neutral with moderate focused
-            # sentence entailment usually means attention dilution across the
-            # 5-sentence chunk, not hallucination. Downgrade only on
-            # negligible entailment or live contradiction (either window).
+            # Soft gate: downgrade if focused entailment is below entail_floor (0.55)
+            # or if there is live contradiction (> contra_cap).
             e_score = nli_check["best_entailment"]["score"]
             c_score = max(nli_check["best_contradiction"]["score"],
                           nli_check.get("sentence_contra_max", {}).get("score", 0.0))
@@ -273,12 +278,9 @@ class GuardrailEngine:
             # Evidence directly contradicts the claim that the LLM mistakenly supported
             final_verdict = "REFUTED"
             status = "NLI_REFUTED_OVERRIDE"
-        elif llm_verdict == "REFUTED" and nli_verdict == "SUPPORTED" and nli_check["confidence"] >= 0.85:
-            # Evidence directly entails the claim that the LLM mistakenly refuted
-            final_verdict = "SUPPORTED"
-            status = "NLI_SUPPORT_OVERRIDE"
         else:
-            # When LLM decided NOT_ENOUGH_INFO, trust LLM's careful omission analysis
+            # When LLM decided NOT_ENOUGH_INFO, or REFUTED where NLI found superficial keyword entailment,
+            # trust LLM's careful omission and logical/arithmetic analysis.
             final_verdict = llm_verdict
             status = "AGREEMENT"
 
