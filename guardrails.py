@@ -191,16 +191,35 @@ class GuardrailEngine:
     def verify_citations(self, cited_ids, passages):
         """
         Deterministic check: ensures cited passage IDs actually exist in the retrieved context.
+        Supports exact match and robust base-ID normalization.
         """
         valid_ids = set()
+        id_map = {}
         for p in passages:
             valid_ids.add(p["id"])
+            id_map[p["id"].strip("[]'\" ").lower()] = p["id"]
+            base_id = p["id"].split("#")[0].strip("[]'\" ").lower()
+            id_map[base_id] = p["id"]
             for sid in p.get("sentence_ids", []):
                 valid_ids.add(sid)
+                id_map[sid.strip("[]'\" ").lower()] = sid
 
         cleaned_cited = [cid.strip("[]'\" ") for cid in cited_ids if cid]
-        valid_citations = [cid for cid in cleaned_cited if cid in valid_ids]
-        hallucinated_citations = [cid for cid in cleaned_cited if cid not in valid_ids]
+        valid_citations = []
+        hallucinated_citations = []
+
+        for cid in cleaned_cited:
+            if cid in valid_ids:
+                valid_citations.append(cid)
+            else:
+                cid_norm = cid.lower()
+                cid_base = cid_norm.split("#")[0]
+                if cid_norm in id_map:
+                    valid_citations.append(id_map[cid_norm])
+                elif cid_base in id_map:
+                    valid_citations.append(id_map[cid_base])
+                else:
+                    hallucinated_citations.append(cid)
 
         return {
             "valid": valid_citations,
@@ -248,7 +267,12 @@ class GuardrailEngine:
         final_verdict = llm_verdict
         status = "AGREEMENT"
 
-        if llm_verdict == nli_verdict:
+        if llm_verdict == "SUPPORTED" and not cite_check["valid"]:
+            # If LLM claimed SUPPORTED but failed to cite any valid evidence from the context,
+            # it is ungrounded and cannot be trusted.
+            final_verdict = "NOT_ENOUGH_INFO"
+            status = "UNGROUNDED_CITATION_DOWNGRADED"
+        elif llm_verdict == nli_verdict:
             final_verdict = llm_verdict
             status = "AGREEMENT"
         elif llm_verdict == "REFUTED" and nli_verdict == "NOT_ENOUGH_INFO":
